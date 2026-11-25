@@ -7,8 +7,12 @@ from starlette.responses import StreamingResponse
 
 from question_service import handle_question
 
+from voice_router import router as voice_router
+
 
 app = FastAPI(title="RAG Architecture PoC")
+
+app.include_router(voice_router)
 
 
 class ChatRequest(BaseModel):

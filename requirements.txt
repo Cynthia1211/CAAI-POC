@@ -4,4 +4,4 @@ python-dotenv
 google-genai
 pydantic
 psycopg[binary]
-boto3
+boto3[crt]
