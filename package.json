@@ -1,0 +1,29 @@
+{
+  "name": "caai-poc",
+  "version": "1.0.0",
+  "description": "A retrieval-augmented generation prototype for user profiles, family relationships, appointments, and care knowledge. Structured data is stored in PostgreSQL (RDS or Supabase), relationships are stored in Amazon Neptune, and document chunks use PostgreSQL with pgvector and full-text search.",
+  "main": "index.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "cypress run --browser chrome",
+    "test:contract": "cypress run --browser chrome --spec cypress/e2e/backend-contract.cy.js",
+    "test:live": "cypress run --browser chrome --spec cypress/e2e/backend-live.cy.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cynthia1211/CAAI-POC.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Cynthia1211/CAAI-POC/issues"
+  },
+  "homepage": "https://github.com/Cynthia1211/CAAI-POC#readme",
+  "devDependencies": {
+    "cypress": "^16.4.0"
+  }
+}
