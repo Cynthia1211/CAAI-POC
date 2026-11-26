@@ -94,3 +94,23 @@ Use exact Chunk Name values from the context. Return an empty array if no chunk 
     }
 
 
+def answer_general_question(
+    query: str,
+    provider: AnswerLLMProvider | None = None,
+) -> dict[str, Any]:
+    """Answer a general question directly, without retrieval or grounded context."""
+    llm = provider or build_answer_provider()
+    system_instruction = (
+        "You are a helpful assistant. Answer the user's general question clearly and concisely. "
+        "Do not claim to have searched personal records or external sources."
+    )
+    answer = llm.generate(prompt=query, system_instruction=system_instruction).strip()
+    return {
+        "answer": answer,
+        "source_chunk_names": [],
+        "sources": [],
+        "chunks": [],
+        "context_text": "",
+    }
+
+

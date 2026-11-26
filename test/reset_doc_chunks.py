@@ -1,9 +1,10 @@
-"""Rebuild doc_chunks from data/data.md without calling build_index.py."""
+"""Rebuild a selected chunk table from a selected Markdown file."""
 
 import sys
 from pathlib import Path
 
 import psycopg
+from psycopg import sql
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -12,12 +13,13 @@ if str(PROJECT_ROOT) not in sys.path:
 from config import DATABASE_BACKEND, require_database_url
 from embedding_provider import embed_text
 
-DOC_OWNER_USER_ID = "USER-001"
-
+DOC_OWNER_USER_ID: str | None = "USER-001"  # Set to None for unowned/shared chunks.
+CHUNK_TABLE = "personal_chunks"  # Choose "doc_chunks" or "personal_chunks".
+MARKDOWN_FILE = PROJECT_ROOT / "data" / "personal_data.md"
 
 def parse_markdown_chunks(
     md_path: Path,
-    user_id: str = DOC_OWNER_USER_ID,
+    user_id: str | None = DOC_OWNER_USER_ID,
 ) -> list[dict]:
     """Split Markdown into chunks owned by the specified user."""
     lines = md_path.read_text(encoding="utf-8").splitlines()
@@ -74,21 +76,44 @@ def embed_chunks(chunks: list[dict]) -> list[dict]:
     return indexed_chunks
 
 
-def reset_doc_chunks(indexed_chunks: list[dict], database_url: str) -> None:
-    """Replace doc_chunks and require an owning user for every indexed chunk."""
-    insert_sql = """
-        insert into doc_chunks (id, category, section, content, embedding, user_id)
-        values (%s, %s, %s, %s, %s::vector, %s)
-    """
+def reset_chunk_table(
+    indexed_chunks: list[dict],
+    database_url: str,
+    table_name: str = CHUNK_TABLE,
+) -> None:
+    """Replace the selected chunk table; require an owning user per chunk."""
+    if not indexed_chunks:
+        raise ValueError("No chunks were provided; cannot infer the embedding dimension.")
+
+    embedding_dimension = len(indexed_chunks[0]["embedding"])
+    if any(len(chunk["embedding"]) != embedding_dimension for chunk in indexed_chunks):
+        raise ValueError("All chunks must have embeddings with the same dimension.")
+
+    table = sql.Identifier(table_name)
+    create_table_sql = sql.SQL("""
+        CREATE TABLE IF NOT EXISTS {} (
+            id TEXT PRIMARY KEY,
+            category TEXT NOT NULL,
+            section TEXT NOT NULL,
+            content TEXT NOT NULL,
+            embedding vector({}) NOT NULL,
+            user_id TEXT REFERENCES user_profiles(user_id) ON DELETE CASCADE
+        )
+    """).format(table, sql.Literal(embedding_dimension))
+    insert_sql = sql.SQL("""
+        INSERT INTO {} (id, category, section, content, embedding, user_id)
+        VALUES (%s, %s, %s, %s, %s::vector, %s)
+    """).format(table)
     with psycopg.connect(database_url) as conn:
         with conn.cursor() as cur:
-            cur.execute("TRUNCATE TABLE doc_chunks")
-            cur.execute("""
-                ALTER TABLE doc_chunks
+            cur.execute(create_table_sql)
+            cur.execute(sql.SQL("TRUNCATE TABLE {}").format(table))
+            cur.execute(sql.SQL("""
+                ALTER TABLE {}
                 ADD COLUMN IF NOT EXISTS user_id TEXT
                 REFERENCES user_profiles(user_id) ON DELETE CASCADE
-            """)
-            cur.execute("ALTER TABLE doc_chunks ALTER COLUMN user_id SET NOT NULL")
+            """).format(table))
+            cur.execute(sql.SQL("ALTER TABLE {} ALTER COLUMN user_id DROP NOT NULL").format(table))
             for chunk in indexed_chunks:
                 vector_literal = "[" + ",".join(
                     str(value) for value in chunk["embedding"]
@@ -107,16 +132,15 @@ def reset_doc_chunks(indexed_chunks: list[dict], database_url: str) -> None:
 
 
 def main() -> None:
-    input_path = PROJECT_ROOT / "data" / "data.md"
     database_url = require_database_url()
 
-    chunks = parse_markdown_chunks(input_path, user_id=DOC_OWNER_USER_ID)
+    chunks = parse_markdown_chunks(MARKDOWN_FILE, user_id=DOC_OWNER_USER_ID)
     indexed_chunks = embed_chunks(chunks)
-    reset_doc_chunks(indexed_chunks, database_url)
+    reset_chunk_table(indexed_chunks, database_url, table_name=CHUNK_TABLE)
 
     print(
-        f"Reset and inserted {len(indexed_chunks)} chunks in "
-        f"{DATABASE_BACKEND} table 'doc_chunks'.",
+        f"Reset and inserted {len(indexed_chunks)} chunks from '{MARKDOWN_FILE}' "
+        f"into {DATABASE_BACKEND} table '{CHUNK_TABLE}'.",
         flush=True,
     )
 

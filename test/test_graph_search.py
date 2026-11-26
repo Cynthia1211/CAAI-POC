@@ -14,10 +14,10 @@ from graph_search import (
     group_entities_by_table,
     query_records_for_entity_groups,
 )
-from structured_query import extract_structured_query, query_postgres_tables
+from postgreSQL_search import extract_structured_query, query_postgres_tables
 
 
-QUERY = "show my family and appointment"
+QUERY = "Who usually takes me to my clinic follow-up?"
 USER_ID = "USER-001"
 
 

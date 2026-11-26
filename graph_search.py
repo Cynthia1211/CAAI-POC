@@ -234,6 +234,10 @@ def search_neptune_relationships(
         grouped_entities,
         relations=graph_result["relations"],
     )
+    record_groups = [group for group in record_groups if group["records"]]
+    if not record_groups:
+        return []
+
     return build_chunks(
         record_groups,
         chunk_prefix="Graph",

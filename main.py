@@ -1,4 +1,5 @@
 import asyncio
+import json
 import queue
 
 from fastapi import FastAPI, Query
@@ -38,11 +39,17 @@ def _stream_chat(req: ChatRequest):
 
     def run_question() -> None:
         try:
-            handle_question(
+            response = handle_question(
                 req.query,
                 current_user=req.user_id,
                 progress_callback=lambda line: events.put(("progress", line)),
             )
+            result = response.get("result", {})
+            if isinstance(result, dict):
+                output = result.get("answer", "")
+            else:
+                output = json.dumps(result, ensure_ascii=False)
+            events.put(("answer", output))
         except Exception as exc:
             events.put(("error", f"{type(exc).__name__}: {exc}"))
         finally:
@@ -54,6 +61,8 @@ def _stream_chat(req: ChatRequest):
             event_type, payload = await asyncio.to_thread(events.get)
             if event_type == "progress":
                 yield f"{payload}\n"
+            elif event_type == "answer":
+                yield f"\n{payload}\n"
             elif event_type == "error":
                 yield f"\nRequest failed: {payload}\n"
             elif event_type == "done":

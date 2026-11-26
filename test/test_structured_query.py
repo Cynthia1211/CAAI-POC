@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from structured_query import (
+from postgreSQL_search import (
     build_postgres_queries,
     extract_structured_query,
     query_postgres_tables,
@@ -19,7 +19,7 @@ from structured_query import (
 from graph_search import extract_entities_from_chunks
 
 
-QUERY = "show my family and appointment"
+QUERY = "Who usually takes me to my clinic follow-up?"
 USER_ID = "USER-001"
 
 
@@ -35,9 +35,6 @@ def main() -> None:
     print("LLM extracted fields:")
     for field, value in spec.model_dump().items():
         print(f"  {field}: {value}")
-
-    if len(chunks) != len(sql_queries):
-        raise AssertionError("Expected exactly one PostgreSQL chunk per SQL query.")
 
     print("\nGenerated SQL queries:")
     print(f"SQL query count: {len(sql_queries)}")

@@ -14,16 +14,18 @@ load_dotenv()
 from hybrid_search import hybrid_search
 
 
-QUERY = "Who usually takes me to my Routine clinic follow-up?"
-USER_ID = "USER-002"
+QUERY = "What is Type 2 Diabetes"
+TABLE_NAME = "doc_chunks"
+USER_ID = None
 
 
 def main() -> None:
-    chunks = hybrid_search(QUERY, user_id=USER_ID)
+    chunks = hybrid_search(QUERY, table_name=TABLE_NAME, user_id=USER_ID)
 
     print("=" * 72)
     print(f"User query: {QUERY}")
     print(f"User ID: {USER_ID}")
+    print(f"Table: {TABLE_NAME}")
     print(f"Returned chunks: {len(chunks)}")
     for index, chunk in enumerate(chunks, start=1):
         print("-" * 72)

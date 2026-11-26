@@ -158,7 +158,8 @@ def query_postgres_tables(
                         "fields": dict(zip(columns, row)),
                     }
                     query_records.append(record)
-                query_results.append({"source": table, "records": query_records})
+                if query_records:
+                    query_results.append({"source": table, "records": query_records})
 
     return build_chunks(
         query_results,

@@ -1,6 +1,7 @@
-"""Hybrid vector and keyword search over PostgreSQL doc_chunks."""
+"""Hybrid vector and keyword search over a selected PostgreSQL chunk table."""
 
 import psycopg
+from psycopg import sql as psql
 
 from config import require_database_url
 from embedding_provider import embed_text as embed_configured_text
@@ -9,27 +10,28 @@ from embedding_provider import embed_text as embed_configured_text
 def fetch_vector_candidates(
     q_vec: list[float],
     database_url: str,
+    table_name: str,
+    user_id: str | None,
     candidate_limit: int = 10,
-    user_id: str = "USER-001",
 ) -> list[dict]:
     """Retrieve nearest chunks from PostgreSQL using pgvector cosine distance."""
     q_literal = "[" + ",".join(str(value) for value in q_vec) + "]"
-    sql = """
+    query_sql = psql.SQL("""
     SELECT
         id,
         category,
         section,
         content,
         1 - (embedding <=> %s::vector) AS vec_score
-    FROM doc_chunks
-    WHERE user_id = %s
+    FROM {}
+    WHERE user_id IS NOT DISTINCT FROM %s
     ORDER BY embedding <=> %s::vector ASC
     LIMIT %s
-    """
+    """).format(psql.Identifier(table_name))
     candidates = []
     with psycopg.connect(database_url) as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, (q_literal, user_id, q_literal, candidate_limit))
+            cur.execute(query_sql, (q_literal, user_id, q_literal, candidate_limit))
             for row_id, category, section, content, vec_score in cur.fetchall():
                 candidates.append({
                     "id": row_id,
@@ -44,11 +46,12 @@ def fetch_vector_candidates(
 def fetch_keyword_candidates(
     query: str,
     database_url: str,
+    table_name: str,
+    user_id: str | None,
     candidate_limit: int = 10,
-    user_id: str = "USER-001",
 ) -> list[dict]:
     """Retrieve chunks matching query terms using PostgreSQL full-text search."""
-    sql = """
+    query_sql = psql.SQL("""
     WITH query_parts AS (
         SELECT
             regexp_replace(
@@ -84,10 +87,11 @@ def fetch_keyword_candidates(
                 content,
                 user_id,
                 to_tsvector('english', coalesce(content, '')) AS document_vector
-            FROM doc_chunks
+            FROM {}
         ) AS chunks
         CROSS JOIN query_parts
-        WHERE chunks.user_id = %s AND document_vector @@ query_parts.tsquery
+        WHERE chunks.user_id IS NOT DISTINCT FROM %s
+          AND document_vector @@ query_parts.tsquery
     )
     SELECT
         id,
@@ -99,11 +103,11 @@ def fetch_keyword_candidates(
     FROM ranked_chunks
     ORDER BY raw_kw_score DESC
     LIMIT %s
-    """
+    """).format(psql.Identifier(table_name))
     candidates = []
     with psycopg.connect(database_url) as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, (query, query, user_id, candidate_limit))
+            cur.execute(query_sql, (query, query, user_id, candidate_limit))
             for row_id, category, section, content, matched_terms, kw_score in cur.fetchall():
                 candidates.append({
                     "id": row_id,
@@ -118,11 +122,12 @@ def fetch_keyword_candidates(
 
 def hybrid_search(
     query: str,
+    table_name: str,
+    user_id: str | None,
     top_k: int = 3,
     vec_weight: float = 0.8,
     kw_weight: float = 0.2,
     candidate_limit: int = 10,
-    user_id: str = "USER-001",
 ) -> list[dict]:
     """Search PostgreSQL by vector and keywords, then return ranked chunks."""
     database_url = require_database_url()
@@ -130,11 +135,22 @@ def hybrid_search(
     limit = max(candidate_limit, top_k * 3)
 
     vector_candidates = fetch_vector_candidates(
-        q_vec, database_url, limit, user_id=user_id
+        q_vec,
+        database_url,
+        table_name=table_name,
+        user_id=user_id,
+        candidate_limit=limit,
     )
     keyword_candidates = fetch_keyword_candidates(
-        query, database_url, limit, user_id=user_id
+        query,
+        database_url,
+        table_name=table_name,
+        user_id=user_id,
+        candidate_limit=limit,
     )
+
+    if not vector_candidates and not keyword_candidates:
+        return []
 
     merged: dict[str, dict] = {}
     for item in vector_candidates:

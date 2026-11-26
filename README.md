@@ -23,15 +23,20 @@ flowchart LR
 | File | Purpose |
 | --- | --- |
 | `main.py` | FastAPI `/chat` endpoint with JSON and `stream=true` responses |
-| `question_service.py` | Orchestrates SQL, Graph, Hybrid, context building, and answer generation |
-| `structured_query.py` | Uses Bedrock to extract search filters and builds/executes parameterized SQL |
+| `question_service.py` | Service entry point for the LangGraph workflow |
+| `rag_graph.py` | Defines the LangGraph nodes, state, conditional routes, and workflow edges |
+| `intent_router.py` | Classifies questions as personal, calendar/reminder, health, or general |
+| `postgreSQL_search.py` | Uses Bedrock to extract search filters and builds/executes parameterized SQL |
 | `graph_search.py` | Runs one-hop Neptune queries, groups entities, and looks up PostgreSQL records |
-| `hybrid_search.py` | Runs vector and full-text search over `doc_chunks`, scoped by user |
-| `chunk_builder.py` | Shared chunk formatting for SQL and Graph results |
+| `hybrid_search.py` | Runs vector and full-text search over a caller-selected chunk table and user |
+| `calendar_reminder.py` | Placeholder calendar/reminder tool that returns one chunk |
+| `external_search.py` | Searches external health sources such as MedlinePlus |
+| `chunk_builder.py` | Shared chunk formatting for SQL, Graph, and external results |
 | `grounded_context_new.py` | Combines chunks into grounded context |
 | `answer_generator.py` | Uses Bedrock to generate answers and sources |
 | `test/insert_*.py` | Creates/inserts sample user, family, and appointment data |
 | `test/reset_doc_chunks.py` | Re-embeds `data/data.md` and rebuilds `doc_chunks` |
+| `test/test_external_search.py` | Queries the external health source and prints topic results |
 | `test/test_*.py` | Manually runs retrieval and answer-generation flows for debugging |
 
 ## Setup
@@ -97,14 +102,22 @@ python test/insert_appointment.py
 
 Edit the `USER_PROFILES`, `FAMILY_RELATIONSHIPS`, and `APPOINTMENTS` variables near the top of the scripts to change the sample IDs and data. The scripts write to PostgreSQL; the family and appointment scripts also create their corresponding Neptune relationships.
 
-### Create the `doc_chunks` table
+### Create the chunk tables
 
-The `doc_chunks` table must exist before running the embedding script. For a new database, enable pgvector and make sure the vector dimension matches the embedding model (the current default is 1536):
+The rebuild script can create the selected table if it does not exist. The example below shows the expected schema; enable pgvector first. The script infers the vector dimension from the embeddings it generates.
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS doc_chunks (
+    id TEXT PRIMARY KEY,
+    category TEXT NOT NULL,
+    section TEXT NOT NULL,
+    content TEXT NOT NULL,
+    embedding vector(1536) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS personal_chunks (
     id TEXT PRIMARY KEY,
     category TEXT NOT NULL,
     section TEXT NOT NULL,
@@ -119,7 +132,7 @@ Then run the embedding/rebuild script:
 python test/reset_doc_chunks.py
 ```
 
-This script clears and rebuilds the entire `doc_chunks` table. It adds a `user_id` foreign-key column and assigns every chunk in `data/data.md` to `DOC_OWNER_USER_ID` (currently `USER-001`). To assign the file to another user, change the variable in `test/reset_doc_chunks.py` before running the script. Make sure that user already exists in `user_profiles`.
+In `test/reset_doc_chunks.py`, set `CHUNK_TABLE` to the destination and `MARKDOWN_FILE` to the Markdown file to embed. The script creates the selected table if needed, then truncates and rebuilds it. The `user_id` foreign-key column is nullable; chunks are assigned to `DOC_OWNER_USER_ID` (currently `USER-001`), or left unowned if you set that variable to `None`. Any non-null user ID must exist in `user_profiles`.
 
 ## Run the service
 
@@ -145,8 +158,9 @@ These scripts call the configured database, Neptune instance, or language models
 python test/test_structured_query.py
 python test/test_graph_search.py
 python test/test_hybrid_search.py
+python test/test_external_search.py
 python test/test_grounded_context.py
 python test/test_answer_generator.py
 ```
 
-Set `USER_ID` near the top of each retrieval test script to switch the test user.
+Set `USER_ID` near the top of each retrieval test script to switch the test user. `test_hybrid_search.py`, `test_grounded_context.py`, and `test_answer_generator.py` also set `TABLE_NAME` to choose the chunk table.
