@@ -1,15 +1,26 @@
 import asyncio
 import json
 import queue
+from pathlib import Path
 
 from fastapi import FastAPI, Query
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
+from calendar_reminder import router as calendar_router
 from question_service import handle_question
+from test.googleCalendar.app import auth_router as google_calendar_auth_router
 
 
 app = FastAPI(title="RAG Architecture PoC")
+app.include_router(google_calendar_auth_router)
+app.include_router(calendar_router)
+app.mount(
+    "/test/googleCalendar",
+    StaticFiles(directory=Path(__file__).resolve().parent / "test" / "googleCalendar", html=True),
+    name="google-calendar-demo",
+)
 
 
 class ChatRequest(BaseModel):
@@ -47,6 +58,8 @@ def _stream_chat(req: ChatRequest):
             result = response.get("result", {})
             if isinstance(result, dict):
                 output = result.get("answer", "")
+            elif isinstance(result, str):
+                output = result
             else:
                 output = json.dumps(result, ensure_ascii=False)
             events.put(("answer", output))

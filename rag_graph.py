@@ -1,6 +1,7 @@
 """LangGraph workflow: retrieve from the available sources, ground, and answer."""
 
 from collections.abc import Callable
+from datetime import date
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -12,7 +13,13 @@ from hybrid_search import hybrid_search
 from intent_router import classify_intent
 from postgreSQL_search import run_structured_query
 from external_search import fetch_external_knowledge
-from calendar_reminder import run_calendar_reminder
+from calendar_reminder import (
+    add_calendar_event,
+    calendar_events_to_chunks,
+    calendar_updated_to_chunk,
+    delete_calendar_event,
+    view_calendar_events,
+)
 
 
 class QuestionState(TypedDict, total=False):
@@ -103,8 +110,58 @@ def _build_rag_graph(progress_callback: Callable[[str], None] | None = None):
         return {"answer_result": result, "trace": trace}
 
     def calendar_reminder_node(state: QuestionState) -> dict:
-        trace = log(state, "Running calendar/reminder tool...")
-        chunks = run_calendar_reminder(state["query"])
+        classification = state["intent"]
+        action = classification.get("calendar_action") or "view"
+        trace = log(state, f"Running calendar {action} operation...")
+        if action == "view":
+            date_from = classification.get("date_from")
+            date_to = classification.get("date_to")
+            time_zone = classification.get("time_zone") or "America/Toronto"
+            events = view_calendar_events(
+                date_from=date_from,
+                date_to=date_to,
+                time_zone=time_zone,
+            )
+            window_note = (
+                f"Reference date: {date.today().isoformat()}. "
+                f"Calendar search window: {date_from or 'now'} through "
+                f"{date_to or 'no end date'} ({time_zone})."
+            )
+            chunks = calendar_events_to_chunks(events, result_note=window_note)
+        elif action == "create":
+            summary = classification.get("summary")
+            start_iso = classification.get("start_iso")
+            end_iso = classification.get("end_iso")
+            time_zone = classification.get("time_zone") or "America/Toronto"
+            if not summary or not start_iso or not end_iso:
+                chunks = calendar_events_to_chunks(
+                    [], result_note="Please provide an event title, date, start time, and end time."
+                )
+            else:
+                create_result = add_calendar_event(
+                    summary,
+                    start_iso,
+                    end_iso,
+                    time_zone,
+                    interpret_as_local_time=True,
+                )
+                chunks = [calendar_updated_to_chunk(create_result)]
+        else:
+            events = view_calendar_events()
+            if not events:
+                chunks = calendar_events_to_chunks(
+                    [], result_note="There are no upcoming events to delete."
+                )
+            else:
+                event_to_delete = events[0]
+                delete_calendar_event(event_to_delete["id"])
+                chunks = calendar_events_to_chunks(
+                    [event_to_delete], result_note="Event deleted successfully."
+                )
+        trace = log(
+            {**state, "trace": trace},
+            f"Calendar operation produced {len(chunks)} chunk(s).",
+        )
         return {"calendar_chunks": chunks, "trace": trace}
 
     def external_node(state: QuestionState) -> dict:
@@ -152,7 +209,7 @@ def _build_rag_graph(progress_callback: Callable[[str], None] | None = None):
         },
     )
     graph.add_edge("external_search", "ground_context")
-    graph.add_edge("calendar_reminder", END)
+    graph.add_edge("calendar_reminder", "ground_context")
     graph.add_edge("ground_context", "answer")
     graph.add_edge("answer", END)
     graph.add_edge("general_answer", END)
@@ -171,16 +228,6 @@ def run_rag_graph(
         "trace": [],
     })
     intent = state["intent"]["intent"]
-    if intent == "calendar":
-        return {
-            "query": query,
-            "route": intent,
-            "reason": state["intent"]["reason"],
-            "intent": state["intent"],
-            "trace": state["trace"],
-            "result": state.get("calendar_chunks", []),
-        }
-
     context = state.get("grounded_context", {
         "count": 0,
         "chunks": [],

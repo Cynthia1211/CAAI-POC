@@ -29,7 +29,7 @@ flowchart LR
 | `postgreSQL_search.py` | Uses Bedrock to extract search filters and builds/executes parameterized SQL |
 | `graph_search.py` | Runs one-hop Neptune queries, groups entities, and looks up PostgreSQL records |
 | `hybrid_search.py` | Runs vector and full-text search over a caller-selected chunk table and user |
-| `calendar_reminder.py` | Placeholder calendar/reminder tool that returns one chunk |
+| `calendar_reminder.py` | Google Calendar OAuth routes and event operations |
 | `external_search.py` | Searches external health sources such as MedlinePlus |
 | `chunk_builder.py` | Shared chunk formatting for SQL, Graph, and external results |
 | `grounded_context_new.py` | Combines chunks into grounded context |
@@ -65,6 +65,9 @@ BEDROCK_REGION=us-east-2
 LLM_PROVIDER=bedrock
 BEDROCK_EMBEDDING_MODEL_ID=us.cohere.embed-v4:0
 BEDROCK_EMBEDDING_DIMENSION=1536
+GOOGLE_CLIENT_ID=<google-oauth-client-id>
+GOOGLE_CLIENT_SECRET=<google-oauth-client-secret>
+GOOGLE_REDIRECT_URI=http://localhost:8000/auth/callback
 ```
 
 You can use `RDS_DATABASE_URL` instead of `RDS_HOST`, `RDS_PORT`, `RDS_DB_NAME`, `RDS_USER`, and `RDS_PASSWORD`. Do not commit credentials; `.gitignore` excludes `.env`.
@@ -139,6 +142,8 @@ In `test/reset_doc_chunks.py`, set `CHUNK_TABLE` to the destination and `MARKDOW
 ```bash
 uvicorn main:app --reload
 ```
+
+The Google Calendar demo is served at `http://localhost:8000/test/googleCalendar/index.html`. Its OAuth client needs that exact redirect URI registered in Google Cloud. The app supports viewing, creating, and deleting events after authorization. Keep OAuth values in `.env` (or the ignored local `test/googleCalendar/.env.json`); never commit secrets. Install the Google Calendar dependencies with `python -m pip install -r requirements.txt`.
 
 The API endpoint is `http://127.0.0.1:8000/chat`. The request body accepts `query` and `user_id`; `user_id` defaults to `USER-001`:
 
