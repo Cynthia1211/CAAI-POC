@@ -40,10 +40,20 @@ def build_answer_provider(
     return BedrockAnswerProvider(model_id=bedrock_model_id or BEDROCK_ANSWER_MODEL_ID)
 
 
+def _format_history(history: list[dict[str, str]] | None) -> str:
+    if not history:
+        return ""
+    return "\n".join(
+        f"{message.get('role', 'user').capitalize()}: {message.get('content', '')}"
+        for message in history
+    )
+
+
 def answer_from_grounded_context(
     query: str,
     grounded_context: dict[str, Any],
     provider: AnswerLLMProvider | None = None,
+    history: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Generate an answer from prebuilt SQL, graph, and hybrid chunks."""
     chunks = grounded_context.get("chunks", [])
@@ -54,8 +64,15 @@ def answer_from_grounded_context(
         "in the provided context. Do not add outside knowledge or assumptions. If the context "
         "does not contain the answer, say so clearly."
     )
+    history_text = _format_history(history)
+    history_section = (
+        f"Recent Conversation (oldest first):\n{history_text}\n\n"
+        "Use this history to understand follow-up references. The current question is the latest request.\n\n"
+        if history_text
+        else ""
+    )
     prompt = f"""
-User Question:
+{history_section}User Question:
 {query}
 
 Grounded Context:
@@ -97,14 +114,23 @@ Use exact Chunk Name values from the context. Return an empty array if no chunk 
 def answer_general_question(
     query: str,
     provider: AnswerLLMProvider | None = None,
+    history: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Answer a general question directly, without retrieval or grounded context."""
     llm = provider or build_answer_provider()
     system_instruction = (
         "You are a helpful assistant. Answer the user's general question clearly and concisely. "
+        "Use supplied conversation history to understand follow-up questions. "
         "Do not claim to have searched personal records or external sources."
     )
-    answer = llm.generate(prompt=query, system_instruction=system_instruction).strip()
+    history_text = _format_history(history)
+    prompt = (
+        f"Recent Conversation (oldest first):\n{history_text}\n\n"
+        f"Current User Question:\n{query}"
+        if history_text
+        else query
+    )
+    answer = llm.generate(prompt=prompt, system_instruction=system_instruction).strip()
     return {
         "answer": answer,
         "source_chunk_names": [],

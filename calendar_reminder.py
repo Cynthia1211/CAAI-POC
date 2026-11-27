@@ -4,14 +4,16 @@ import json
 import os
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from chunk_builder import build_chunks
+from config import BEDROCK_EXTRACTOR_MODEL_ID, BEDROCK_REGION, LLM_PROVIDER
+from llm_provider import generate_text, parse_json_object
 
 
 router = APIRouter()
@@ -21,6 +23,78 @@ CONFIG_PATH = BASE_DIR / ".env.json"
 load_dotenv(Path(__file__).resolve().parent / ".env")
 SESSION_USER_ID = "demo_user"
 TOKEN_STORE: dict[str, dict[str, Any]] = {}
+
+
+CalendarAction = Literal["view", "create", "delete"]
+
+
+class CalendarOperation(BaseModel):
+    """Calendar-specific action and event details extracted for execution."""
+
+    action: CalendarAction
+    summary: str | None = None
+    start_iso: str | None = None
+    end_iso: str | None = None
+    date_from: str | None = None
+    date_to: str | None = None
+    time_zone: str = "America/Toronto"
+
+
+def extract_calendar_operation(
+    query: str,
+    history: list[dict[str, str]] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    time_zone: str = "America/Toronto",
+) -> CalendarOperation:
+    """Extract action and event details using the calendar-specific context."""
+    reference_date = datetime.now(ZoneInfo(time_zone)).date().isoformat()
+    history_text = "\n".join(
+        f"{item.get('role', 'user')}: {item.get('content', '')}"
+        for item in (history or [])
+    ) or "(no prior conversation)"
+    prompt = f"""
+Extract a calendar operation from the current request and recent conversation.
+Recent conversation (oldest first):
+{history_text}
+Current request: {query}
+Known date_from: {date_from or 'none'}
+Known date_to: {date_to or 'none'}
+Time zone: {time_zone}
+Reference date in that time zone: {reference_date}
+
+Return exactly one JSON object with these fields:
+{{"action":"view","summary":null,"start_iso":null,"end_iso":null,"date_from":null,"date_to":null,"time_zone":"{time_zone}"}}
+
+Choose action view, create, or delete. Continue an unfinished calendar action when the current request supplies missing details; merge title, date, time, and time zone from relevant history. If the user changes topic or action, follow the current request. For creates, return local wall-clock start_iso/end_iso in YYYY-MM-DDTHH:MM:SS format without UTC offset. Resolve relative dates using the reference date above. Use known date_from/date_to as authoritative date hints. Do not invent missing titles, dates, or times. For view, use known date bounds if present. Leave irrelevant fields null.
+""".strip()
+    if LLM_PROVIDER != "bedrock":
+        raise ValueError(f"Unsupported LLM_PROVIDER: {LLM_PROVIDER}. Choose 'bedrock'.")
+
+    last_error: Exception | None = None
+    for attempt in range(2):
+        retry = (
+            "\nReturn valid JSON only with action, summary, start_iso, end_iso, date_from, date_to, and time_zone."
+            if attempt
+            else ""
+        )
+        try:
+            output = generate_text(
+                model_id=BEDROCK_EXTRACTOR_MODEL_ID,
+                region_name=BEDROCK_REGION,
+                prompt=prompt + retry,
+                temperature=0,
+            )
+            parsed = CalendarOperation.model_validate(parse_json_object(output))
+            updates: dict[str, str | None] = {"time_zone": time_zone}
+            if date_from is not None:
+                updates["date_from"] = date_from
+            if date_to is not None:
+                updates["date_to"] = date_to
+            return parsed.model_copy(update=updates)
+        except (ValueError, ValidationError) as exc:
+            last_error = exc
+    raise ValueError("The calendar extractor did not return a valid operation.") from last_error
 
 
 def set_calendar_token(token: str, refresh_token: str | None) -> None:
@@ -357,3 +431,77 @@ def calendar_updated_to_chunk(result: dict[str, Any]) -> dict[str, Any]:
         empty_detail=content,
     )
     return chunks[0]
+
+
+def _run_calendar_view(operation: CalendarOperation) -> list[dict[str, Any]]:
+    """Run a calendar lookup and return its grounded context chunk."""
+    events = view_calendar_events(
+        date_from=operation.date_from,
+        date_to=operation.date_to,
+        time_zone=operation.time_zone,
+    )
+    today = datetime.now(ZoneInfo(operation.time_zone)).date().isoformat()
+    window_note = (
+        f"Reference date: {today}. Calendar search window: "
+        f"{operation.date_from or 'now'} through "
+        f"{operation.date_to or 'no end date'} ({operation.time_zone})."
+    )
+    return calendar_events_to_chunks(events, result_note=window_note)
+
+
+def _run_calendar_create(operation: CalendarOperation) -> list[dict[str, Any]]:
+    """Create a calendar event when the required details are available."""
+    if not operation.summary or not operation.start_iso or not operation.end_iso:
+        return calendar_events_to_chunks(
+            [], result_note="Please provide an event title, date, start time, and end time."
+        )
+    result = add_calendar_event(
+        operation.summary,
+        operation.start_iso,
+        operation.end_iso,
+        operation.time_zone,
+        interpret_as_local_time=True,
+    )
+    return [calendar_updated_to_chunk(result)]
+
+
+def _run_calendar_delete(operation: CalendarOperation) -> list[dict[str, Any]]:
+    """Find and delete the requested calendar event, returning a result chunk."""
+    events = view_calendar_events(
+        date_from=operation.date_from,
+        date_to=operation.date_to,
+        time_zone=operation.time_zone,
+    )
+    if not events:
+        return calendar_events_to_chunks(
+            [], result_note="There are no upcoming events to delete."
+        )
+
+    target_event = events[0]
+    if operation.summary:
+        target_event = next(
+            (
+                event for event in events
+                if event.get("summary", "").casefold() == operation.summary.casefold()
+            ),
+            {},
+        )
+    if not target_event:
+        return calendar_events_to_chunks(
+            [], result_note=f"No calendar event named '{operation.summary}' was found in that date range."
+        )
+
+    delete_calendar_event(target_event["id"])
+    return calendar_events_to_chunks(
+        [target_event], result_note="Event deleted successfully."
+    )
+
+
+def execute_calendar_operation(operation: CalendarOperation) -> list[dict[str, Any]]:
+    """Dispatch a validated calendar operation to its execution function."""
+    action_handlers = {
+        "view": _run_calendar_view,
+        "create": _run_calendar_create,
+        "delete": _run_calendar_delete,
+    }
+    return action_handlers[operation.action](operation)

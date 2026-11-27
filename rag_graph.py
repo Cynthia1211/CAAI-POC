@@ -1,24 +1,24 @@
 """LangGraph workflow: retrieve from the available sources, ground, and answer."""
 
 from collections.abc import Callable
-from datetime import date
-from typing import Any, TypedDict
+from typing import Any, TypedDict, Annotated
 
-from langgraph.graph import END, START, StateGraph
+from langgraph.graph import END, START, StateGraph, add_messages
+from langgraph.checkpoint.memory import MemorySaver
+from langchain_core.messages import AnyMessage, HumanMessage, AIMessage
+from langchain_core.runnables import RunnableConfig
 
 from answer_generator import answer_from_grounded_context, answer_general_question
-from graph_search import extract_entities_from_chunks, search_neptune_relationships
+from chunk_builder import build_chunks
+from graph_search import extract_entities_from_chunks, search_user_graph
 from grounded_context_new import build_grounded_context_new
 from hybrid_search import hybrid_search
 from intent_router import classify_intent
-from postgreSQL_search import run_structured_query
+from postgreSQL_search import get_records_by_ids
 from external_search import fetch_external_knowledge
 from calendar_reminder import (
-    add_calendar_event,
-    calendar_events_to_chunks,
-    calendar_updated_to_chunk,
-    delete_calendar_event,
-    view_calendar_events,
+    execute_calendar_operation,
+    extract_calendar_operation,
 )
 
 
@@ -28,6 +28,7 @@ class QuestionState(TypedDict, total=False):
     intent: dict[str, Any]
     sql_chunks: list[dict[str, Any]]
     graph_chunks: list[dict[str, Any]]
+    candidate_personal_chunk_ids: list[str]
     hybrid_chunks: list[dict[str, Any]]
     external_chunks: list[dict[str, Any]]
     calendar_chunks: list[dict[str, Any]]
@@ -35,60 +36,99 @@ class QuestionState(TypedDict, total=False):
     grounded_context: dict[str, Any]
     answer_result: dict[str, Any]
     trace: list[str]
+    messages: Annotated[list[AnyMessage], add_messages]
 
 
-def _build_rag_graph(progress_callback: Callable[[str], None] | None = None):
-    """Build a request-scoped graph so progress reporting stays request-scoped too."""
-    def log(state: QuestionState, message: str) -> list[str]:
-        if progress_callback:
-            progress_callback(message)
+def _build_rag_graph(checkpointer: Any | None = None):
+    """Build and compile the graph with an injectable checkpoint backend."""
+    def recent_history(state: QuestionState) -> list[dict[str, str]]:
+        return [
+            {
+                "role": "user" if isinstance(message, HumanMessage) else "assistant",
+                "content": str(message.content),
+            }
+            for message in state.get("messages", [])[-8:]
+        ]
+
+    def log(state: QuestionState, message: str, config: RunnableConfig) -> list[str]:
+        callback = (config.get("configurable") or {}).get("progress_callback")
+        if callback:
+            callback(message)
         return [*state.get("trace", []), message]
 
-    def intent_node(state: QuestionState) -> dict:
-        trace = log(state, "Classifying question intent...")
-        classification = classify_intent(state["query"])
+    def intent_node(state: QuestionState, config: RunnableConfig) -> dict:
+        trace = log(state, "Classifying question intent...", config)
+        classification = classify_intent(state["query"], history=recent_history(state))
         trace = log(
             {**state, "trace": trace},
             f"Classified intent: {classification.intent}",
+            config,
         )
         return {"intent": classification.model_dump(), "trace": trace}
 
-    def structured_node(state: QuestionState) -> dict:
-        trace = log(state, "Running PostgreSQL search...")
-        chunks = run_structured_query(state["query"], current_user=state["current_user"])
-        trace = log({**state, "trace": trace}, f"PostgreSQL returned {len(chunks)} query chunk(s).")
-        return {"sql_chunks": chunks, "entities": extract_entities_from_chunks(chunks), "trace": trace}
+    def structured_node(state: QuestionState, config: RunnableConfig) -> dict:
+        trace = log(state, "Running PostgreSQL search...", config)
+        profile_records = get_records_by_ids(
+            "user_profiles",
+            [state["current_user"]],
+            id_column="user_id",
+        )
+        chunks = build_chunks(
+            [profile_records] if profile_records else [],
+            chunk_prefix="PostgreSQL",
+            empty_detail="No rows returned.",
+            entity_fields={"user_profiles": "user_id"},
+        )
+        trace = log({**state, "trace": trace}, f"PostgreSQL returned {len(chunks)} query chunk(s).", config)
+        return {
+            "sql_chunks": chunks,
+            "entities": extract_entities_from_chunks(chunks),
+            "trace": trace,
+        }
 
-    def graph_node(state: QuestionState) -> dict:
-        trace = log(state, "Searching Neptune relationships...")
-        chunks = search_neptune_relationships(state.get("sql_chunks", []))
-        trace = log({**state, "trace": trace}, f"Graph lookup returned {len(chunks)} table-group chunk(s).")
-        return {"graph_chunks": chunks, "trace": trace}
+    def graph_node(state: QuestionState, config: RunnableConfig) -> dict:
+        trace = log(state, "Searching Neptune relationships...", config)
+        result = search_user_graph(state["current_user"])
+        chunks = result["chunks"]
+        entities = state.get("entities", []) + extract_entities_from_chunks(chunks)
+        deduplicated_entities = []
+        seen_entities = set()
+        for entity in entities:
+            key = tuple(entity.items())
+            if key not in seen_entities:
+                seen_entities.add(key)
+                deduplicated_entities.append(entity)
+        trace = log({**state, "trace": trace}, f"Graph lookup returned {len(chunks)} table-group chunk(s).", config)
+        return {
+            "graph_chunks": chunks,
+            "entities": deduplicated_entities,
+            "candidate_personal_chunk_ids": result["personal_chunk_ids"],
+            "trace": trace,
+        }
 
-    def hybrid_node(state: QuestionState) -> dict:
+    def hybrid_node(state: QuestionState, config: RunnableConfig) -> dict:
         intent = state["intent"]["intent"]
         if intent == "personal":
             table_name = "personal_chunks"
-            chunk_user_id = state["current_user"]
         else:
-            # Health knowledge chunks are shared and stored with a NULL user_id.
+            # Health knowledge chunks are shared and stored without a user_id column.
             table_name = "doc_chunks"
-            chunk_user_id = None
 
-        trace = log(
-            state,
-            f"Running hybrid document search in {table_name} (user_id={chunk_user_id})...",
-        )
+        trace = log(state, f"Running hybrid document search in {table_name}...", config)
         chunks = hybrid_search(
             state["query"],
             table_name=table_name,
-            user_id=chunk_user_id,
+            candidate_ids=(
+                state.get("candidate_personal_chunk_ids", [])
+                if table_name == "personal_chunks"
+                else None
+            ),
         )
-        trace = log({**state, "trace": trace}, f"Hybrid search returned {len(chunks)} chunk(s).")
+        trace = log({**state, "trace": trace}, f"Hybrid search returned {len(chunks)} chunk(s).", config)
         return {"hybrid_chunks": chunks, "trace": trace}
 
-    def context_node(state: QuestionState) -> dict:
-        trace = log(state, "Building grounded context...")
+    def context_node(state: QuestionState, config: RunnableConfig) -> dict:
+        trace = log(state, "Building grounded context...", config)
         chunks = (
             state.get("sql_chunks", [])
             + state.get("graph_chunks", [])
@@ -99,76 +139,61 @@ def _build_rag_graph(progress_callback: Callable[[str], None] | None = None):
         context = build_grounded_context_new(chunks)
         return {"grounded_context": context, "trace": trace}
 
-    def answer_node(state: QuestionState) -> dict:
-        trace = log(state, "Generating answer...")
-        result = answer_from_grounded_context(state["query"], state["grounded_context"])
-        return {"answer_result": result, "trace": trace}
+    def answer_node(state: QuestionState, config: RunnableConfig) -> dict:
+        trace = log(state, "Generating answer...", config)
+        history = recent_history(state)
+        result = answer_from_grounded_context(
+            state["query"],
+            state["grounded_context"],
+            history=history,
+        )
+        answer_text = result.get("answer", "")
+        return {
+            "answer_result": result,
+            "messages": [
+                HumanMessage(content=state["query"]),
+                AIMessage(content=answer_text),
+            ],
+            "trace": trace,
+        }
 
-    def general_answer_node(state: QuestionState) -> dict:
-        trace = log(state, "Answering general question directly...")
-        result = answer_general_question(state["query"])
-        return {"answer_result": result, "trace": trace}
+    def general_answer_node(state: QuestionState, config: RunnableConfig) -> dict:
+        trace = log(state, "Answering general question directly...", config)
+        history = recent_history(state)
+        result = answer_general_question(state["query"], history=history)
+        answer_text = result.get("answer", "")
+        return {
+            "answer_result": result,
+            "messages": [
+                HumanMessage(content=state["query"]),
+                AIMessage(content=answer_text),
+            ],
+            "trace": trace,
+        }
 
-    def calendar_reminder_node(state: QuestionState) -> dict:
+    def calendar_reminder_node(state: QuestionState, config: RunnableConfig) -> dict:
         classification = state["intent"]
-        action = classification.get("calendar_action") or "view"
-        trace = log(state, f"Running calendar {action} operation...")
-        if action == "view":
-            date_from = classification.get("date_from")
-            date_to = classification.get("date_to")
-            time_zone = classification.get("time_zone") or "America/Toronto"
-            events = view_calendar_events(
-                date_from=date_from,
-                date_to=date_to,
-                time_zone=time_zone,
-            )
-            window_note = (
-                f"Reference date: {date.today().isoformat()}. "
-                f"Calendar search window: {date_from or 'now'} through "
-                f"{date_to or 'no end date'} ({time_zone})."
-            )
-            chunks = calendar_events_to_chunks(events, result_note=window_note)
-        elif action == "create":
-            summary = classification.get("summary")
-            start_iso = classification.get("start_iso")
-            end_iso = classification.get("end_iso")
-            time_zone = classification.get("time_zone") or "America/Toronto"
-            if not summary or not start_iso or not end_iso:
-                chunks = calendar_events_to_chunks(
-                    [], result_note="Please provide an event title, date, start time, and end time."
-                )
-            else:
-                create_result = add_calendar_event(
-                    summary,
-                    start_iso,
-                    end_iso,
-                    time_zone,
-                    interpret_as_local_time=True,
-                )
-                chunks = [calendar_updated_to_chunk(create_result)]
-        else:
-            events = view_calendar_events()
-            if not events:
-                chunks = calendar_events_to_chunks(
-                    [], result_note="There are no upcoming events to delete."
-                )
-            else:
-                event_to_delete = events[0]
-                delete_calendar_event(event_to_delete["id"])
-                chunks = calendar_events_to_chunks(
-                    [event_to_delete], result_note="Event deleted successfully."
-                )
+        operation = extract_calendar_operation(
+            state["query"],
+            history=recent_history(state),
+            date_from=classification.get("date_from"),
+            date_to=classification.get("date_to"),
+            time_zone=classification.get("time_zone") or "America/Toronto",
+        )
+        trace = log(state, f"Running calendar {operation.action} operation...", config)
+        chunks = execute_calendar_operation(operation)
         trace = log(
             {**state, "trace": trace},
             f"Calendar operation produced {len(chunks)} chunk(s).",
+            config,
         )
         return {"calendar_chunks": chunks, "trace": trace}
 
-    def external_node(state: QuestionState) -> dict:
-        trace = log(state, "Searching external health sources...")
+    def external_node(state: QuestionState, config: RunnableConfig) -> dict:
+        trace = log(state, "Searching external health sources...", config)
         result = fetch_external_knowledge(state["query"])
         chunks = result.get("chunks", [])
-        trace = log({**state, "trace": trace}, f"External health search returned {len(chunks)} result(s).")
+        trace = log({**state, "trace": trace}, f"External health search returned {len(chunks)} result(s).", config)
         return {"external_chunks": chunks, "trace": trace}
 
     graph = StateGraph(QuestionState)
@@ -195,14 +220,11 @@ def _build_rag_graph(progress_callback: Callable[[str], None] | None = None):
             "general": "general_answer",
         },
     )
-    def route_after_hybrid(state: QuestionState) -> str:
-        return state["intent"]["intent"]
-
     graph.add_edge("postgresql", "graph_rag")
     graph.add_edge("graph_rag", "hybrid_rag")
     graph.add_conditional_edges(
         "hybrid_rag",
-        route_after_hybrid,
+        route_intent,
         {
             "personal": "ground_context",
             "health": "external_search",
@@ -213,20 +235,26 @@ def _build_rag_graph(progress_callback: Callable[[str], None] | None = None):
     graph.add_edge("ground_context", "answer")
     graph.add_edge("answer", END)
     graph.add_edge("general_answer", END)
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
+
+
+# Keep the backend swappable while using in-memory session checkpoints locally.
+_checkpointer = MemorySaver()
+_rag_app = _build_rag_graph(checkpointer=_checkpointer)
 
 
 def run_rag_graph(
     query: str,
     current_user: str = "USER-001",
     progress_callback: Callable[[str], None] | None = None,
+    session_id: str = "default-session",
 ) -> dict:
     """Run the available retrieval tools through LangGraph and return the API payload."""
-    state = _build_rag_graph(progress_callback).invoke({
+    state = _rag_app.invoke({
         "query": query,
         "current_user": current_user,
         "trace": [],
-    })
+    }, config={"configurable": {"thread_id": session_id, "progress_callback": progress_callback}})
     intent = state["intent"]["intent"]
     context = state.get("grounded_context", {
         "count": 0,
@@ -241,7 +269,7 @@ def run_rag_graph(
         "intent": state["intent"],
         "trace": state["trace"],
         "result": {
-            "answer": answer["answer"],
+            "answer": answer.get("answer", ""),
             "entities": state.get("entities", []),
             "total_chunks": context["count"],
             "chunks": context["chunks"],
@@ -249,3 +277,7 @@ def run_rag_graph(
             "sources": answer["sources"],
         },
     }
+
+
+# command to get Mermaid code for https://mermaid.ai/app/dashboard
+# python -c 'from rag_graph import _rag_app; print(_rag_app.get_graph().draw_mermaid())'

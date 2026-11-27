@@ -6,16 +6,16 @@ A retrieval-augmented generation prototype for user profiles, family relationshi
 
 ```mermaid
 flowchart LR
-    A[POST /chat: query + user_id] --> B[Structured SQL search]
-    B --> C[Neptune one-hop graph search]
-    C --> D[Hybrid document search]
+    A[POST /chat: query + user_id] --> B[User profile SQL lookup]
+    B --> C[Neptune graph lookup up to 3 hops]
+    C --> D[Candidate-scoped personal hybrid search]
     D --> E[Build grounded context]
     E --> F[Bedrock answer generation]
 ```
 
-- Structured SQL search looks up the requesting user's rows in `user_profiles`, `family_relationships`, and `appointments`.
-- Graph search starts from entity IDs in the SQL chunks, finds one-hop Neptune relationships, groups related entities by type, and looks up their records in PostgreSQL.
-- Hybrid search combines pgvector similarity search with PostgreSQL full-text search and filters document chunks by `user_id`.
+- PostgreSQL search looks up only the current user's `user_profiles` row. Graph search starts from the user ID, finds family and appointment nodes up to three hops away, and looks up those records in PostgreSQL.
+- Graph search returns owned `personal_chunks` IDs without loading their content. Hybrid search loads only those candidates, then combines pgvector cosine similarity with PostgreSQL full-text search. `doc_chunks` remains a shared health-knowledge search source.
+- Hybrid search combines pgvector similarity search with PostgreSQL full-text search. Neither `doc_chunks` nor `personal_chunks` stores a `user_id`; optional ownership is represented by Neptune `owns` edges.
 - SQL, Graph, and Hybrid chunks are combined into grounded context and sent to Bedrock to generate an answer with sources.
 
 ## Project files
@@ -26,16 +26,16 @@ flowchart LR
 | `question_service.py` | Service entry point for the LangGraph workflow |
 | `rag_graph.py` | Defines the LangGraph nodes, state, conditional routes, and workflow edges |
 | `intent_router.py` | Classifies questions as personal, calendar/reminder, health, or general |
-| `postgreSQL_search.py` | Uses Bedrock to extract search filters and builds/executes parameterized SQL |
-| `graph_search.py` | Runs one-hop Neptune queries, groups entities, and looks up PostgreSQL records |
-| `hybrid_search.py` | Runs vector and full-text search over a caller-selected chunk table and user |
+| `postgreSQL_search.py` | Looks up PostgreSQL records by table and primary key IDs |
+| `graph_search.py` | Queries user-related Neptune nodes and hydrates family/appointment records from PostgreSQL |
+| `hybrid_search.py` | Runs vector and full-text search over shared document chunks or graph-selected personal chunks |
 | `calendar_reminder.py` | Google Calendar OAuth routes and event operations |
 | `external_search.py` | Searches external health sources such as MedlinePlus |
 | `chunk_builder.py` | Shared chunk formatting for SQL, Graph, and external results |
 | `grounded_context_new.py` | Combines chunks into grounded context |
 | `answer_generator.py` | Uses Bedrock to generate answers and sources |
 | `test/insert_*.py` | Creates/inserts sample user, family, and appointment data |
-| `test/reset_doc_chunks.py` | Re-embeds `data/data.md` and rebuilds `doc_chunks` |
+| `test/reset_doc_chunks.py` | Embeds the selected Markdown file and rebuilds `doc_chunks` or `personal_chunks` |
 | `test/test_external_search.py` | Queries the external health source and prints topic results |
 | `test/test_*.py` | Manually runs retrieval and answer-generation flows for debugging |
 
@@ -79,7 +79,7 @@ BEDROCK_EXTRACTOR_MODEL_ID=<bedrock-model-id>
 BEDROCK_ANSWER_MODEL_ID=<bedrock-model-id>
 ```
 
-`LLM_PROVIDER` selects the embedding provider. Gemini embeddings are also supported; set `LLM_PROVIDER=gemini` and provide `GEMINI_API_KEY` to use them. Query extraction and answer generation use Bedrock.
+Router, query extraction, answer generation, and embeddings currently use Amazon Bedrock. The provider selection remains centralized in `config.py` so another backend can be added later.
 
 ### Neptune SSH tunnel
 
@@ -95,7 +95,7 @@ The application connects to the tunnel at `https://localhost:8182` by default. T
 
 ## Initialize database data
 
-Create users first because the `user_id` columns in the family and appointment tables reference `user_profiles(user_id)`:
+Create user profiles first so the sample user IDs are available to the structured search and graph relationships:
 
 ```bash
 python test/insert_user_profile.py
@@ -135,7 +135,7 @@ Then run the embedding/rebuild script:
 python test/reset_doc_chunks.py
 ```
 
-In `test/reset_doc_chunks.py`, set `CHUNK_TABLE` to the destination and `MARKDOWN_FILE` to the Markdown file to embed. The script creates the selected table if needed, then truncates and rebuilds it. The `user_id` foreign-key column is nullable; chunks are assigned to `DOC_OWNER_USER_ID` (currently `USER-001`), or left unowned if you set that variable to `None`. Any non-null user ID must exist in `user_profiles`.
+In `test/reset_doc_chunks.py`, set `CHUNK_TABLE` to the destination and `MARKDOWN_FILE` to the Markdown file to embed. The script creates the selected table if needed, then truncates and rebuilds it without a `user_id` column. If `DOC_OWNER_USER_ID` is set, the script records ownership in Neptune as `User -[relationship: owns]-> Chunk`.
 
 ## Run the service
 
@@ -160,7 +160,7 @@ Omit `?stream=true` to receive a JSON response. This PoC accepts `user_id` direc
 These scripts call the configured database, Neptune instance, or language models; they are not isolated unit tests. Configure `.env`, AWS credentials, and the SSH tunnel before running them:
 
 ```bash
-python test/test_structured_query.py
+python test/test_postgreSQL_search.py
 python test/test_graph_search.py
 python test/test_hybrid_search.py
 python test/test_external_search.py
@@ -168,4 +168,4 @@ python test/test_grounded_context.py
 python test/test_answer_generator.py
 ```
 
-Set `USER_ID` near the top of each retrieval test script to switch the test user. `test_hybrid_search.py`, `test_grounded_context.py`, and `test_answer_generator.py` also set `TABLE_NAME` to choose the chunk table.
+Set `USER_ID` near the top of `test_postgreSQL_search.py`, `test_graph_search.py`, `test_grounded_context.py`, and `test_answer_generator.py` to switch the test user. `test_hybrid_search.py` accepts a `QUERY` and `CANDIDATE_CHUNK_IDS` list for personal chunk retrieval.

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Query
 from pydantic import BaseModel
-from starlette.responses import StreamingResponse
+from starlette.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from calendar_reminder import router as calendar_router
@@ -26,6 +26,7 @@ app.mount(
 class ChatRequest(BaseModel):
     query: str
     user_id: str = "USER-001"
+    session_id: str = "default-session"
 
 
 @app.post("/chat")
@@ -34,14 +35,19 @@ def chat(req: ChatRequest, stream: bool = Query(default=False)):
     if stream:
         return _stream_chat(req)
 
-    response = handle_question(req.query, current_user=req.user_id)
+    response = handle_question(req.query, current_user=req.user_id, session_id=req.session_id)
     result = response["result"]
     answer = result["answer"] if isinstance(result, dict) else result
 
-    return {
+    payload = {
         **response,
         "answer": answer,
     }
+    # Return formatted JSON so the complete result payload is readable in curl.
+    return Response(
+        content=json.dumps(payload, ensure_ascii=False, indent=2),
+        media_type="application/json; charset=utf-8",
+    )
 
 
 def _stream_chat(req: ChatRequest):
@@ -53,6 +59,7 @@ def _stream_chat(req: ChatRequest):
             response = handle_question(
                 req.query,
                 current_user=req.user_id,
+                session_id=req.session_id,
                 progress_callback=lambda line: events.put(("progress", line)),
             )
             result = response.get("result", {})
