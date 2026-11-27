@@ -1,4 +1,4 @@
-"""Create family_relationships if needed, insert samples, and link them in Neptune."""
+"""Create family rows and user-to-family edges in Neptune."""
 
 import json
 import os
@@ -45,35 +45,40 @@ def main() -> None:
             CREATE TABLE IF NOT EXISTS family_relationships (
                 family_id TEXT PRIMARY KEY,
                 family_name TEXT NOT NULL,
-                family_relationship TEXT NOT NULL,
-                user_id TEXT NOT NULL REFERENCES user_profiles(user_id)
+                family_relationship TEXT NOT NULL
             )
         """)
+        conn.execute("ALTER TABLE family_relationships DROP COLUMN IF EXISTS user_id CASCADE")
         conn.cursor().executemany(
             """
             INSERT INTO family_relationships
-                (family_id, family_name, family_relationship, user_id)
-            VALUES (%s, %s, %s, %s)
+                (family_id, family_name, family_relationship)
+            VALUES (%s, %s, %s)
             ON CONFLICT (family_id) DO UPDATE SET
                 family_name = EXCLUDED.family_name,
-                family_relationship = EXCLUDED.family_relationship,
-                user_id = EXCLUDED.user_id
+                family_relationship = EXCLUDED.family_relationship
             """,
-            FAMILY_RELATIONSHIPS,
+            [(family_id, family_name, relationship)
+             for family_id, family_name, relationship, _user_id in FAMILY_RELATIONSHIPS],
         )
 
     for family_id, family_name, relationship, user_id in FAMILY_RELATIONSHIPS:
+        parameters = json.dumps({
+            "user_id": user_id,
+            "family_id": family_id,
+            "relationship": relationship,
+        })
+        client.execute_open_cypher_query(
+            openCypherQuery="""MATCH (u:User {id: $user_id})-[r:relationship]->(f:Family {id: $family_id})
+            DELETE r""",
+            parameters=parameters,
+        )
         client.execute_open_cypher_query(
             openCypherQuery="""MERGE (u:User {id: $user_id})
             MERGE (f:Family {id: $family_id})
             REMOVE f.name
-            MERGE (u)-[r:relationship {name: $relationship}]->(f)
-            SET r.relationship = $relationship""",
-            parameters=json.dumps({
-                "user_id": user_id,
-                "family_id": family_id,
-                "relationship": relationship,
-            }),
+            MERGE (u)-[:relationship {relationship: $relationship}]->(f)""",
+            parameters=parameters,
         )
 
     print(f"Inserted/updated {len(FAMILY_RELATIONSHIPS)} family row(s) and Neptune relationship(s).")

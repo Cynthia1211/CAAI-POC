@@ -1,4 +1,4 @@
-"""Embedding adapters for Gemini and Amazon Bedrock."""
+"""Embedding adapter for the configured language model provider."""
 
 import json
 from typing import Any
@@ -7,9 +7,7 @@ from config import (
     BEDROCK_EMBEDDING_DIMENSION,
     BEDROCK_EMBEDDING_MODEL_ID,
     BEDROCK_REGION,
-    GEMINI_EMBEDDING_MODEL,
     LLM_PROVIDER,
-    require_gemini_api_key,
 )
 
 
@@ -17,9 +15,7 @@ def embed_text(text: str, task_type: str) -> list[float]:
     """Embed text with the configured provider and retrieval task type."""
     if LLM_PROVIDER == "bedrock":
         return _embed_with_bedrock(text, task_type)
-    if LLM_PROVIDER == "gemini":
-        return _embed_with_gemini(text, task_type)
-    raise ValueError(f"Unsupported LLM_PROVIDER: {LLM_PROVIDER}. Choose 'gemini' or 'bedrock'.")
+    raise ValueError(f"Unsupported LLM_PROVIDER: {LLM_PROVIDER}. Choose 'bedrock'.")
 
 
 def _embed_with_bedrock(text: str, task_type: str) -> list[float]:
@@ -73,16 +69,3 @@ def _embed_with_bedrock(text: str, task_type: str) -> list[float]:
     if isinstance(embeddings, dict):
         embeddings = embeddings["float"]
     return embeddings[0]
-
-
-def _embed_with_gemini(text: str, task_type: str) -> list[float]:
-    from google import genai
-    from google.genai import types
-
-    client = genai.Client(api_key=require_gemini_api_key())
-    response = client.models.embed_content(
-        model=GEMINI_EMBEDDING_MODEL,
-        contents=text,
-        config=types.EmbedContentConfig(task_type=task_type),
-    )
-    return response.embeddings[0].values

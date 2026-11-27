@@ -7,12 +7,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
-
-GEMINI_ROUTER_MODEL = os.getenv("GEMINI_ROUTER_MODEL", "gemini-3.5-flash").strip()
-GEMINI_EXTRACTOR_MODEL = os.getenv("GEMINI_EXTRACTOR_MODEL", "gemini-3.5-flash").strip()
-GEMINI_ANSWER_MODEL = os.getenv("GEMINI_ANSWER_MODEL", "gemini-3.5-flash").strip()
-GEMINI_EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001").strip()
+# Provider selection stays centralized so another backend can be added later.
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "bedrock").strip().lower()
 
 BEDROCK_MODEL_ID = os.getenv(
     "BEDROCK_MODEL_ID",
@@ -33,7 +29,6 @@ BEDROCK_REGION = (
 ).strip()
 
 DATABASE_BACKEND = os.getenv("DATABASE_BACKEND", "supabase").strip().lower()
-
 
 def require_database_url() -> str:
     """Return the DSN for the selected database backend."""
@@ -80,11 +75,3 @@ def require_database_url() -> str:
             f"Missing {variable_name}. Add the PostgreSQL connection string to the .env file."
         )
     return database_url
-
-
-def require_gemini_api_key() -> str:
-    """Return the configured Gemini API key or raise a clear configuration error."""
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("Missing GEMINI_API_KEY. Add it to the .env file.")
-    return api_key

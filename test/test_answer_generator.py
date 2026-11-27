@@ -12,20 +12,33 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from answer_generator import answer_from_grounded_context
-from graph_search import search_neptune_relationships
+from chunk_builder import build_chunks
+from graph_search import search_user_graph
 from grounded_context_new import build_grounded_context_new
 from hybrid_search import hybrid_search
-from structured_query import run_structured_query
+from postgreSQL_search import get_records_by_ids
 
 
 QUERY = "Who usually takes me to my Routine clinic follow-up?"
-USER_ID = "USER-002"
+USER_ID = "USER-001"
+TABLE_NAME = "personal_chunks"
 
 
 def main() -> None:
-    sql_chunks = run_structured_query(QUERY, current_user=USER_ID)
-    graph_chunks = search_neptune_relationships(sql_chunks)
-    hybrid_chunks = hybrid_search(QUERY, user_id=USER_ID)
+    profile_records = get_records_by_ids("user_profiles", [USER_ID], id_column="user_id")
+    sql_chunks = build_chunks(
+        [profile_records] if profile_records else [],
+        chunk_prefix="PostgreSQL",
+        empty_detail="No rows returned.",
+        entity_fields={"user_profiles": "user_id"},
+    )
+    graph_result = search_user_graph(USER_ID)
+    graph_chunks = graph_result["chunks"]
+    hybrid_chunks = hybrid_search(
+        QUERY,
+        table_name=TABLE_NAME,
+        candidate_ids=graph_result["personal_chunk_ids"],
+    )
     chunks = sql_chunks + graph_chunks + hybrid_chunks
     grounded = build_grounded_context_new(chunks)
     answer_result = answer_from_grounded_context(

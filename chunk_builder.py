@@ -17,10 +17,12 @@ def build_chunks(
     chunk_prefix: str,
     empty_detail: str,
     entity_fields: dict[str, str] | None = None,
+    start_index: int = 1,
+    chunk_name: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build shared-format chunks from SQL query or graph lookup records."""
     chunks: list[dict[str, Any]] = []
-    for index, query_result in enumerate(query_results, start=1):
+    for index, query_result in enumerate(query_results, start=start_index):
         source = query_result["source"]
         records = query_result["records"]
         entity_field = (entity_fields or {}).get(source)
@@ -43,7 +45,7 @@ def build_chunks(
             row_details.append("Graph relations: " + "; ".join(relation_details))
         detail = "\n".join(row_details) if row_details else empty_detail
         chunks.append({
-            "Chunk Name": f"{chunk_prefix}{index:02d}",
+            "Chunk Name": chunk_name or f"{chunk_prefix}{index:02d}",
             "Source": source,
             "Detail": detail,
             "Entities": entities,

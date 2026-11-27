@@ -1,7 +1,9 @@
 fastapi
 uvicorn[standard]
 python-dotenv
-google-genai
 pydantic
+langgraph
 psycopg[binary]
 boto3
+google-auth-oauthlib
+google-api-python-client

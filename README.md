@@ -6,16 +6,16 @@ A retrieval-augmented generation prototype for user profiles, family relationshi
 
 ```mermaid
 flowchart LR
-    A[POST /chat: query + user_id] --> B[Structured SQL search]
-    B --> C[Neptune one-hop graph search]
-    C --> D[Hybrid document search]
+    A[POST /chat: query + user_id] --> B[User profile SQL lookup]
+    B --> C[Neptune graph lookup up to 3 hops]
+    C --> D[Candidate-scoped personal hybrid search]
     D --> E[Build grounded context]
     E --> F[Bedrock answer generation]
 ```
 
-- Structured SQL search looks up the requesting user's rows in `user_profiles`, `family_relationships`, and `appointments`.
-- Graph search starts from entity IDs in the SQL chunks, finds one-hop Neptune relationships, groups related entities by type, and looks up their records in PostgreSQL.
-- Hybrid search combines pgvector similarity search with PostgreSQL full-text search and filters document chunks by `user_id`.
+- PostgreSQL search looks up only the current user's `user_profiles` row. Graph search starts from the user ID, finds family and appointment nodes up to three hops away, and looks up those records in PostgreSQL.
+- Graph search returns owned `personal_chunks` IDs without loading their content. Hybrid search loads only those candidates, then combines pgvector cosine similarity with PostgreSQL full-text search. `doc_chunks` remains a shared health-knowledge search source.
+- Hybrid search combines pgvector similarity search with PostgreSQL full-text search. Neither `doc_chunks` nor `personal_chunks` stores a `user_id`; optional ownership is represented by Neptune `owns` edges.
 - SQL, Graph, and Hybrid chunks are combined into grounded context and sent to Bedrock to generate an answer with sources.
 
 ## Project files
@@ -23,15 +23,20 @@ flowchart LR
 | File | Purpose |
 | --- | --- |
 | `main.py` | FastAPI `/chat` endpoint with JSON and `stream=true` responses |
-| `question_service.py` | Orchestrates SQL, Graph, Hybrid, context building, and answer generation |
-| `structured_query.py` | Uses Bedrock to extract search filters and builds/executes parameterized SQL |
-| `graph_search.py` | Runs one-hop Neptune queries, groups entities, and looks up PostgreSQL records |
-| `hybrid_search.py` | Runs vector and full-text search over `doc_chunks`, scoped by user |
-| `chunk_builder.py` | Shared chunk formatting for SQL and Graph results |
+| `question_service.py` | Service entry point for the LangGraph workflow |
+| `rag_graph.py` | Defines the LangGraph nodes, state, conditional routes, and workflow edges |
+| `intent_router.py` | Classifies questions as personal, calendar/reminder, health, or general |
+| `postgreSQL_search.py` | Looks up PostgreSQL records by table and primary key IDs |
+| `graph_search.py` | Queries user-related Neptune nodes and hydrates family/appointment records from PostgreSQL |
+| `hybrid_search.py` | Runs vector and full-text search over shared document chunks or graph-selected personal chunks |
+| `calendar_reminder.py` | Google Calendar OAuth routes and event operations |
+| `external_search.py` | Searches external health sources such as MedlinePlus |
+| `chunk_builder.py` | Shared chunk formatting for SQL, Graph, and external results |
 | `grounded_context_new.py` | Combines chunks into grounded context |
 | `answer_generator.py` | Uses Bedrock to generate answers and sources |
 | `test/insert_*.py` | Creates/inserts sample user, family, and appointment data |
-| `test/reset_doc_chunks.py` | Re-embeds `data/data.md` and rebuilds `doc_chunks` |
+| `test/reset_doc_chunks.py` | Embeds the selected Markdown file and rebuilds `doc_chunks` or `personal_chunks` |
+| `test/test_external_search.py` | Queries the external health source and prints topic results |
 | `test/test_*.py` | Manually runs retrieval and answer-generation flows for debugging |
 
 ## Setup
@@ -60,6 +65,9 @@ BEDROCK_REGION=us-east-2
 LLM_PROVIDER=bedrock
 BEDROCK_EMBEDDING_MODEL_ID=us.cohere.embed-v4:0
 BEDROCK_EMBEDDING_DIMENSION=1536
+GOOGLE_CLIENT_ID=<google-oauth-client-id>
+GOOGLE_CLIENT_SECRET=<google-oauth-client-secret>
+GOOGLE_REDIRECT_URI=http://localhost:8000/auth/callback
 ```
 
 You can use `RDS_DATABASE_URL` instead of `RDS_HOST`, `RDS_PORT`, `RDS_DB_NAME`, `RDS_USER`, and `RDS_PASSWORD`. Do not commit credentials; `.gitignore` excludes `.env`.
@@ -71,7 +79,7 @@ BEDROCK_EXTRACTOR_MODEL_ID=<bedrock-model-id>
 BEDROCK_ANSWER_MODEL_ID=<bedrock-model-id>
 ```
 
-`LLM_PROVIDER` selects the embedding provider. Gemini embeddings are also supported; set `LLM_PROVIDER=gemini` and provide `GEMINI_API_KEY` to use them. Query extraction and answer generation use Bedrock.
+Router, query extraction, answer generation, and embeddings currently use Amazon Bedrock. The provider selection remains centralized in `config.py` so another backend can be added later.
 
 ### Neptune SSH tunnel
 
@@ -87,7 +95,7 @@ The application connects to the tunnel at `https://localhost:8182` by default. T
 
 ## Initialize database data
 
-Create users first because the `user_id` columns in the family and appointment tables reference `user_profiles(user_id)`:
+Create user profiles first so the sample user IDs are available to the structured search and graph relationships:
 
 ```bash
 python test/insert_user_profile.py
@@ -97,14 +105,22 @@ python test/insert_appointment.py
 
 Edit the `USER_PROFILES`, `FAMILY_RELATIONSHIPS`, and `APPOINTMENTS` variables near the top of the scripts to change the sample IDs and data. The scripts write to PostgreSQL; the family and appointment scripts also create their corresponding Neptune relationships.
 
-### Create the `doc_chunks` table
+### Create the chunk tables
 
-The `doc_chunks` table must exist before running the embedding script. For a new database, enable pgvector and make sure the vector dimension matches the embedding model (the current default is 1536):
+The rebuild script can create the selected table if it does not exist. The example below shows the expected schema; enable pgvector first. The script infers the vector dimension from the embeddings it generates.
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS doc_chunks (
+    id TEXT PRIMARY KEY,
+    category TEXT NOT NULL,
+    section TEXT NOT NULL,
+    content TEXT NOT NULL,
+    embedding vector(1536) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS personal_chunks (
     id TEXT PRIMARY KEY,
     category TEXT NOT NULL,
     section TEXT NOT NULL,
@@ -119,13 +135,15 @@ Then run the embedding/rebuild script:
 python test/reset_doc_chunks.py
 ```
 
-This script clears and rebuilds the entire `doc_chunks` table. It adds a `user_id` foreign-key column and assigns every chunk in `data/data.md` to `DOC_OWNER_USER_ID` (currently `USER-001`). To assign the file to another user, change the variable in `test/reset_doc_chunks.py` before running the script. Make sure that user already exists in `user_profiles`.
+In `test/reset_doc_chunks.py`, set `CHUNK_TABLE` to the destination and `MARKDOWN_FILE` to the Markdown file to embed. The script creates the selected table if needed, then truncates and rebuilds it without a `user_id` column. If `DOC_OWNER_USER_ID` is set, the script records ownership in Neptune as `User -[relationship: owns]-> Chunk`.
 
 ## Run the service
 
 ```bash
 uvicorn main:app --reload
 ```
+
+The Google Calendar demo is served at `http://localhost:8000/test/googleCalendar/index.html`. Its OAuth client needs that exact redirect URI registered in Google Cloud. The app supports viewing, creating, and deleting events after authorization. Keep OAuth values in `.env` (or the ignored local `test/googleCalendar/.env.json`); never commit secrets. Install the Google Calendar dependencies with `python -m pip install -r requirements.txt`.
 
 The API endpoint is `http://127.0.0.1:8000/chat`. The request body accepts `query` and `user_id`; `user_id` defaults to `USER-001`:
 
@@ -142,11 +160,12 @@ Omit `?stream=true` to receive a JSON response. This PoC accepts `user_id` direc
 These scripts call the configured database, Neptune instance, or language models; they are not isolated unit tests. Configure `.env`, AWS credentials, and the SSH tunnel before running them:
 
 ```bash
-python test/test_structured_query.py
+python test/test_postgreSQL_search.py
 python test/test_graph_search.py
 python test/test_hybrid_search.py
+python test/test_external_search.py
 python test/test_grounded_context.py
 python test/test_answer_generator.py
 ```
 
-Set `USER_ID` near the top of each retrieval test script to switch the test user.
+Set `USER_ID` near the top of `test_postgreSQL_search.py`, `test_graph_search.py`, `test_grounded_context.py`, and `test_answer_generator.py` to switch the test user. `test_hybrid_search.py` accepts a `QUERY` and `CANDIDATE_CHUNK_IDS` list for personal chunk retrieval.

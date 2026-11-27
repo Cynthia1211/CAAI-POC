@@ -1,4 +1,4 @@
-"""Create appointments if needed, insert samples, and create their Neptune edges."""
+"""Create appointment rows and user/family-to-appointment Neptune edges."""
 
 import json
 import os
@@ -46,22 +46,21 @@ def main() -> None:
             CREATE TABLE IF NOT EXISTS appointments (
                 appointment_id TEXT PRIMARY KEY,
                 appointment_desc TEXT NOT NULL,
-                appointment_date TIMESTAMP NOT NULL,
-                user_id TEXT NOT NULL REFERENCES user_profiles(user_id)
+                appointment_date TIMESTAMP NOT NULL
             )
         """)
+        conn.execute("ALTER TABLE appointments DROP COLUMN IF EXISTS user_id CASCADE")
         # The attending family ID stays in this script's input for the Neptune edge.
         conn.cursor().executemany(
             """
             INSERT INTO appointments
-                (appointment_id, appointment_desc, appointment_date, user_id)
-            VALUES (%s, %s, %s, %s)
+                (appointment_id, appointment_desc, appointment_date)
+            VALUES (%s, %s, %s)
             ON CONFLICT (appointment_id) DO UPDATE SET
                 appointment_desc = EXCLUDED.appointment_desc,
-                appointment_date = EXCLUDED.appointment_date,
-                user_id = EXCLUDED.user_id
+                appointment_date = EXCLUDED.appointment_date
             """,
-            [(appointment_id, description, appointment_date, user_id)
+            [(appointment_id, description, appointment_date)
              for appointment_id, description, appointment_date, user_id, _family_id in APPOINTMENTS],
         )
 
@@ -82,8 +81,8 @@ def main() -> None:
             REMOVE a.description, a.date
             MERGE (u:User {id: $user_id})
             MERGE (f:Family {id: $family_id})
-            MERGE (a)-[:attendedBy {attendedBy: 'self'}]->(u)
-            MERGE (a)-[:attendedBy {attendedBy: 'companion'}]->(f)""",
+            MERGE (u)-[:relationship {relationship: 'scheduled'}]->(a)
+            MERGE (f)-[:relationship {relationship: 'accompanies'}]->(a)""",
             parameters=json.dumps({
                 "appointment_id": appointment_id,
                 "user_id": user_id,
@@ -98,5 +97,5 @@ if __name__ == "__main__":
     main()
 
 # command to verify the inserted data:
-# python -c 'import psycopg; from config import require_database_url; conn=psycopg.connect(require_database_url()); rows=conn.execute("SELECT appointment_id, appointment_desc, appointment_date, user_id FROM appointments ORDER BY appointment_id").fetchall(); print(*[(a, b, c.strftime("%Y-%m-%d %H:%M:%S"), d) for a,b,c,d in rows], sep="\n"); conn.close()'
-# python -c 'import boto3; from botocore import UNSIGNED; from botocore.config import Config; c=boto3.client("neptunedata", endpoint_url="https://localhost:8182", region_name="us-east-2", config=Config(signature_version=UNSIGNED), verify=False); q="MATCH (a:Appointment)-[r:attendedBy]->(x) RETURN a.id, r.attendedBy, x.id ORDER BY a.id, r.attendedBy"; rows=c.execute_open_cypher_query(openCypherQuery=q)["results"]; print(*rows, sep="\n")'
+# python -c 'import psycopg; from config import require_database_url; conn=psycopg.connect(require_database_url()); rows=conn.execute("SELECT appointment_id, appointment_desc, appointment_date FROM appointments ORDER BY appointment_id").fetchall(); print(*[(a, b, c.strftime("%Y-%m-%d %H:%M:%S")) for a,b,c in rows], sep="\n"); conn.close()'
+# python -c 'import boto3; from botocore import UNSIGNED; from botocore.config import Config; c=boto3.client("neptunedata", endpoint_url="https://localhost:8182", region_name="us-east-2", config=Config(signature_version=UNSIGNED), verify=False); q="MATCH (x)-[r:relationship]->(a:Appointment) RETURN labels(x), x.id, r.relationship, a.id ORDER BY a.id, r.relationship"; rows=c.execute_open_cypher_query(openCypherQuery=q)["results"]; print(*rows, sep="\n")'
