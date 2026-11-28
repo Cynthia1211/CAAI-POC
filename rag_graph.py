@@ -16,10 +16,8 @@ from hybrid_search import hybrid_search
 from intent_router import classify_intent
 from postgreSQL_search import get_records_by_ids
 from external_search import fetch_external_knowledge
-from calendar_reminder import (
-    execute_calendar_operation,
-    extract_calendar_operation,
-)
+import calendar_google
+from calendar_graph import run_calendar_subgraph
 
 
 class QuestionState(TypedDict, total=False):
@@ -32,11 +30,19 @@ class QuestionState(TypedDict, total=False):
     hybrid_chunks: list[dict[str, Any]]
     external_chunks: list[dict[str, Any]]
     calendar_chunks: list[dict[str, Any]]
+    pending_delete_ids: list[str]
     entities: list[dict[str, str]]
     grounded_context: dict[str, Any]
     answer_result: dict[str, Any]
     trace: list[str]
     messages: Annotated[list[AnyMessage], add_messages]
+
+
+def _reply_update(query: str, result: dict[str, Any]) -> QuestionState:
+    return {
+        "answer_result": result,
+        "messages": [HumanMessage(content=query), AIMessage(content=result.get("answer", ""))],
+    }
 
 
 def _build_rag_graph(checkpointer: Any | None = None):
@@ -64,7 +70,10 @@ def _build_rag_graph(checkpointer: Any | None = None):
             f"Classified intent: {classification.intent}",
             config,
         )
-        return {"intent": classification.model_dump(), "trace": trace}
+        result = {"intent": classification.model_dump(), "trace": trace}
+        if classification.intent != "calendar":
+            result["pending_delete_ids"] = []
+        return result
 
     def structured_node(state: QuestionState, config: RunnableConfig) -> dict:
         trace = log(state, "Running PostgreSQL search...", config)
@@ -141,53 +150,33 @@ def _build_rag_graph(checkpointer: Any | None = None):
 
     def answer_node(state: QuestionState, config: RunnableConfig) -> dict:
         trace = log(state, "Generating answer...", config)
-        history = recent_history(state)
-        result = answer_from_grounded_context(
-            state["query"],
-            state["grounded_context"],
-            history=history,
-        )
-        answer_text = result.get("answer", "")
-        return {
-            "answer_result": result,
-            "messages": [
-                HumanMessage(content=state["query"]),
-                AIMessage(content=answer_text),
-            ],
-            "trace": trace,
-        }
+        chunks = state.get("calendar_chunks", []) if state["intent"]["intent"] == "calendar" else []
+        if chunks and "delete_receipt" in chunks[0]:
+            chunk = chunks[0]
+            result = {
+                "answer": f"{chunk['delete_receipt']}\n\nSources used:\n- Chunk Name: {chunk['Chunk Name']}\n  Source: {chunk['Source']}",
+                "sources": [chunk],
+                "source_chunk_names": [chunk["Chunk Name"]],
+            }
+        else:
+            result = answer_from_grounded_context(
+                state["query"], state["grounded_context"], history=recent_history(state)
+            )
+        return {**_reply_update(state["query"], result), "trace": trace}
 
     def general_answer_node(state: QuestionState, config: RunnableConfig) -> dict:
         trace = log(state, "Answering general question directly...", config)
         history = recent_history(state)
         result = answer_general_question(state["query"], history=history)
-        answer_text = result.get("answer", "")
-        return {
-            "answer_result": result,
-            "messages": [
-                HumanMessage(content=state["query"]),
-                AIMessage(content=answer_text),
-            ],
-            "trace": trace,
-        }
+        return {**_reply_update(state["query"], result), "trace": trace}
 
-    def calendar_reminder_node(state: QuestionState, config: RunnableConfig) -> dict:
-        classification = state["intent"]
-        operation = extract_calendar_operation(
-            state["query"],
-            history=recent_history(state),
-            date_from=classification.get("date_from"),
-            date_to=classification.get("date_to"),
-            time_zone=classification.get("time_zone") or "America/Toronto",
+    def calendar_node(state: QuestionState, config: RunnableConfig) -> dict:
+        result = run_calendar_subgraph(
+            state["query"], provider=calendar_google, history=recent_history(state),
+            pending_delete_ids=state.get("pending_delete_ids", []),
+            progress_callback=(config.get("configurable") or {}).get("progress_callback"),
         )
-        trace = log(state, f"Running calendar {operation.action} operation...", config)
-        chunks = execute_calendar_operation(operation)
-        trace = log(
-            {**state, "trace": trace},
-            f"Calendar operation produced {len(chunks)} chunk(s).",
-            config,
-        )
-        return {"calendar_chunks": chunks, "trace": trace}
+        return {**result, "trace": [*state.get("trace", []), *result["trace"]]}
 
     def external_node(state: QuestionState, config: RunnableConfig) -> dict:
         trace = log(state, "Searching external health sources...", config)
@@ -202,7 +191,7 @@ def _build_rag_graph(checkpointer: Any | None = None):
     graph.add_node("graph_rag", graph_node)
     graph.add_node("hybrid_rag", hybrid_node)
     graph.add_node("external_search", external_node)
-    graph.add_node("calendar_reminder", calendar_reminder_node)
+    graph.add_node("calendar", calendar_node)
     graph.add_node("ground_context", context_node)
     graph.add_node("answer", answer_node)
     graph.add_node("general_answer", general_answer_node)
@@ -215,7 +204,7 @@ def _build_rag_graph(checkpointer: Any | None = None):
         route_intent,
         {
             "personal": "postgresql",
-            "calendar": "calendar_reminder",
+            "calendar": "calendar",
             "health": "hybrid_rag",
             "general": "general_answer",
         },
@@ -231,7 +220,7 @@ def _build_rag_graph(checkpointer: Any | None = None):
         },
     )
     graph.add_edge("external_search", "ground_context")
-    graph.add_edge("calendar_reminder", "ground_context")
+    graph.add_edge("calendar", "ground_context")
     graph.add_edge("ground_context", "answer")
     graph.add_edge("answer", END)
     graph.add_edge("general_answer", END)

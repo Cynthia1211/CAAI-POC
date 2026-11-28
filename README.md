@@ -29,7 +29,8 @@ flowchart LR
 | `postgreSQL_search.py` | Looks up PostgreSQL records by table and primary key IDs |
 | `graph_search.py` | Queries user-related Neptune nodes and hydrates family/appointment records from PostgreSQL |
 | `hybrid_search.py` | Runs vector and full-text search over shared document chunks or graph-selected personal chunks |
-| `calendar_reminder.py` | Google Calendar OAuth routes and event operations |
+| `calendar_utils.py` | Shared calendar extraction, formatting, and provider dispatch |
+| `calendar_google.py` | Google Calendar credentials, event operations, and API routes |
 | `external_search.py` | Searches external health sources such as MedlinePlus |
 | `chunk_builder.py` | Shared chunk formatting for SQL, Graph, and external results |
 | `grounded_context_new.py` | Combines chunks into grounded context |
@@ -143,7 +144,7 @@ In `test/reset_doc_chunks.py`, set `CHUNK_TABLE` to the destination and `MARKDOW
 uvicorn main:app --reload
 ```
 
-The Google Calendar demo is served at `http://localhost:8000/test/googleCalendar/index.html`. Its OAuth client needs that exact redirect URI registered in Google Cloud. The app supports viewing, creating, and deleting events after authorization. Keep OAuth values in `.env` (or the ignored local `test/googleCalendar/.env.json`); never commit secrets. Install the Google Calendar dependencies with `python -m pip install -r requirements.txt`.
+The Google Calendar demo is served at `http://localhost:8000/test/googleCalendar/index.html`. Register the configured GOOGLE_REDIRECT_URI (by default, http://localhost:8000/auth/callback) with the OAuth client in Google Cloud. The app supports viewing, creating, and deleting events after authorization. Store OAuth values in the root `.env` or set them as environment variables. Install the Google Calendar dependencies with `python -m pip install -r requirements.txt`.
 
 The API endpoint is `http://127.0.0.1:8000/chat`. The request body accepts `query` and `user_id`; `user_id` defaults to `USER-001`:
 

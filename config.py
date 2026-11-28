@@ -9,6 +9,7 @@ load_dotenv()
 
 # Provider selection stays centralized so another backend can be added later.
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "bedrock").strip().lower()
+DEFAULT_TIME_ZONE = "America/Toronto"
 
 BEDROCK_MODEL_ID = os.getenv(
     "BEDROCK_MODEL_ID",
