@@ -1,8 +1,8 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Google Calendar 接入小 Demo</title>
+  <title>Google Calendar Integration Demo</title>
   <style>
     body { font-family: sans-serif; max-width: 720px; margin: 40px auto; line-height: 1.6; }
     input, button { padding: 8px 12px; margin: 4px; }
@@ -10,17 +10,17 @@
   </style>
 </head>
 <body>
-  <h1>Google Calendar 小 Demo</h1>
-  <p><a href="/auth/login"><button>1. 连接 Google Calendar</button></a></p>
+  <h1>Google Calendar Demo</h1>
+  <p><a href="/auth/login"><button>1. Connect Google Calendar</button></a></p>
 
-  <h2>2. 新增日程</h2>
-  <input id="summary" placeholder="日程标题，例如：交周报" />
+  <h2>2. Add an event</h2>
+  <input id="summary" placeholder="Event title, e.g. weekly report" />
   <input id="startIso" type="datetime-local" size="26" />
   <input id="endIso" type="datetime-local" size="26" />
-  <button onclick="addEvent()">添加</button>
+  <button onclick="addEvent()">Add</button>
 
-  <h2>3. 日程列表</h2>
-  <button onclick="loadEvents()">刷新日程</button>
+  <h2>3. Events</h2>
+  <button onclick="loadEvents()">Refresh events</button>
   <div id="events"></div>
 
   <script>
@@ -29,7 +29,7 @@
       const box = document.getElementById("events");
       if (!res.ok) {
         const error = await res.json().catch(() => ({}));
-        box.innerHTML = `<p>${error.detail || "请先点击上方“连接 Google Calendar”完成授权。"}</p>`;
+        box.innerHTML = `<p>${error.detail || "Please connect Google Calendar above to authorize access."}</p>`;
         return;
       }
       const data = await res.json();
@@ -37,18 +37,18 @@
         <div class="event-row">
           <div><strong>${escapeHtml(ev.summary)}</strong><br/><small>${escapeHtml(ev.start)} ~ ${escapeHtml(ev.end)}</small><br/><small>ID: ${escapeHtml(ev.id)}</small></div>
           <div>
-            <button data-event-id="${escapeHtml(ev.id)}" data-summary="${escapeHtml(ev.summary)}" onclick="updateEvent(this.dataset.eventId, this.dataset.summary)">修改标题</button>
-            <button data-event-id="${escapeHtml(ev.id)}" onclick="removeEvent(this.dataset.eventId)">删除</button>
+            <button data-event-id="${escapeHtml(ev.id)}" data-summary="${escapeHtml(ev.summary)}" onclick="updateEvent(this.dataset.eventId, this.dataset.summary)">Edit title</button>
+            <button data-event-id="${escapeHtml(ev.id)}" onclick="removeEvent(this.dataset.eventId)">Delete</button>
           </div>
         </div>
-      `).join("") || "<p>暂无日程</p>";
+      `).join("") || "<p>No events found</p>";
     }
 
     async function addEvent() {
       const summary = document.getElementById("summary").value.trim();
       const startValue = document.getElementById("startIso").value;
       const endValue = document.getElementById("endIso").value;
-      if (!summary || !startValue || !endValue) return alert("请填写标题、开始和结束时间");
+      if (!summary || !startValue || !endValue) return alert("Please enter a title, start time, and end time");
       const start_iso = new Date(startValue).toISOString();
       const end_iso = new Date(endValue).toISOString();
 
@@ -62,7 +62,7 @@
         loadEvents();
       } else {
         const error = await res.json().catch(() => ({}));
-        alert(error.detail || "创建失败，请检查授权和时间格式");
+        alert(error.detail || "Creation failed. Check authorization and time format.");
       }
     }
 
@@ -71,12 +71,12 @@
       if (res.ok) loadEvents();
       else {
         const error = await res.json().catch(() => ({}));
-        alert(error.detail || "删除失败");
+        alert(error.detail || "Deletion failed");
       }
     }
 
     async function updateEvent(id, currentSummary) {
-      const summary = prompt("请输入新的日程标题", currentSummary);
+      const summary = prompt("Enter a new event title", currentSummary);
       if (summary === null || !summary.trim()) return;
       const res = await fetch(`/api/events/${encodeURIComponent(id)}`, {
         method: "PATCH",
@@ -86,7 +86,7 @@
       if (res.ok) loadEvents();
       else {
         const error = await res.json().catch(() => ({}));
-        alert(error.detail || "修改失败");
+        alert(error.detail || "Update failed");
       }
     }
 

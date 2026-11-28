@@ -1,49 +1,22 @@
-"""Google OAuth test flow. Calendar CRUD lives in calendar_reminder.py."""
+"""Google OAuth test flow. Calendar CRUD lives in calendar_google.py."""
 
-import json
-import os
 import sys
 from pathlib import Path
-from typing import Any
 
-from dotenv import load_dotenv
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BASE_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = BASE_DIR / ".env.json"
-load_dotenv(ROOT_DIR / ".env")
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from calendar_reminder import set_calendar_token
+from calendar_google import SCOPES, google_oauth_config, set_calendar_token
 
 
-SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 CODE_VERIFIER_STORE: dict[str, str] = {}
 auth_router = APIRouter()
-
-
-def _oauth_config() -> dict[str, str]:
-    file_config: dict[str, Any] = {}
-    if CONFIG_PATH.exists():
-        file_config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    values = {
-        "client_id": os.getenv("GOOGLE_CLIENT_ID") or file_config.get("client_id"),
-        "client_secret": os.getenv("GOOGLE_CLIENT_SECRET") or file_config.get("client_secret"),
-        "redirect_uri": os.getenv("GOOGLE_REDIRECT_URI") or file_config.get(
-            "redirect_uri", "http://localhost:8000/auth/callback"
-        ),
-    }
-    missing = [key for key, value in values.items() if not value]
-    if missing:
-        raise RuntimeError(
-            "Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI "
-            "or configure test/googleCalendar/.env.json (missing " + ", ".join(missing) + ")."
-        )
-    return values  # type: ignore[return-value]
 
 
 def _build_flow():
@@ -51,7 +24,7 @@ def _build_flow():
         from google_auth_oauthlib.flow import Flow
     except ImportError as exc:
         raise RuntimeError("Install Google Calendar dependencies with: pip install -r requirements.txt") from exc
-    config = _oauth_config()
+    config = google_oauth_config()
     return Flow.from_client_config(
         client_config={
             "web": {
@@ -85,7 +58,7 @@ def auth_login():
 def auth_callback(request: Request):
     code = request.query_params.get("code")
     if not code:
-        raise HTTPException(status_code=400, detail="缺少授权 code")
+        raise HTTPException(status_code=400, detail="Missing authorization code")
     flow = _build_flow()
     state = request.query_params.get("state")
     if state and state in CODE_VERIFIER_STORE:

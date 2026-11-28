@@ -9,6 +9,8 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY *.py ./
+COPY test/__init__.py ./test/
+COPY test/googleCalendar/*.py test/googleCalendar/index.html ./test/googleCalendar/
 
 EXPOSE 8000
 

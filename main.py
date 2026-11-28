@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from starlette.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from calendar_reminder import router as calendar_router
+from calendar_google import router as calendar_router
 from question_service import handle_question
 from test.googleCalendar.app import auth_router as google_calendar_auth_router
 
